@@ -1,5 +1,3 @@
-# from __future__ import annotations
-
 import ast
 import json
 import operator
@@ -110,7 +108,6 @@ class CriterionResult:
     criterion_id: str
     criterion_description: str
     score: int
-    verdict: str
     answer: str
     evidence: list[dict[str, Any]]
     confidence: float
@@ -645,7 +642,6 @@ SYSTEM_PROMPT = """Ты аналитик GitHub-репозиториев
   "criterion_id": "...",
   "criterion_description": "...",
   "score": 0,
-  "verdict": "...",
   "answer": "...",
   "evidence": [
     {"path": "...", "chunk_index": 0, "quote": "...", "why": "..."}
@@ -732,7 +728,6 @@ def unwrap_payload(obj: Any) -> dict[str, Any]:
         "criterion_id",
         "criterion_description",
         "score",
-        "verdict",
         "answer",
         "evidence",
         "confidence",
@@ -867,10 +862,6 @@ def recover_loose_payload(text: str) -> dict[str, Any] | None:
     if score_text is not None:
         score = safe_int(score_text, 0)
 
-    verdict = _find_first_match([
-        r'"verdict"\s*:\s*"((?:\\.|[^"\\])*)"',
-    ], text, flags=re.DOTALL)
-
     answer = _find_first_match([
         r'"answer"\s*:\s*"((?:\\.|[^"\\])*)"',
     ], text, flags=re.DOTALL)
@@ -893,14 +884,13 @@ def recover_loose_payload(text: str) -> dict[str, Any] | None:
         if len(evidence) >= 3:
             break
 
-    if not any([criterion_id, criterion_description, verdict, answer, evidence, score is not None, confidence > 0]):
+    if not any([criterion_id, criterion_description, answer, evidence, score is not None, confidence > 0]):
         return None
 
     return {
         "criterion_id": criterion_id or "unknown",
         "criterion_description": criterion_description or "",
         "score": score if score is not None else 0,
-        "verdict": verdict or "Не указан вердикт",
         "answer": answer or "Нет текстового ответа",
         "evidence": evidence,
         "confidence": confidence,
@@ -917,7 +907,6 @@ def normalize_payload(payload: dict[str, Any], criterion: Criterion, raw: str) -
         "criterion_id": str(payload.get("criterion_id", criterion.id)),
         "criterion_description": str(payload.get("criterion_description", criterion.description)),
         "score": extract_score_from_payload(payload, criterion),
-        "verdict": str(payload.get("verdict") or "Не указан вердикт"),
         "answer": str(payload.get("answer") or "Нет текстового ответа."),
         "evidence": evidence,
         "confidence": safe_float(payload.get("confidence"), 0.0),
@@ -1077,7 +1066,6 @@ class RepoAnalyzer:
             criterion_id=criterion.id,
             criterion_description=criterion.description,
             score=0,
-            verdict="Не удалось корректно распарсить ответ модели",
             answer=answer,
             evidence=evidence,
             confidence=0.0,
@@ -1150,7 +1138,6 @@ ID: {criterion.id}
                 criterion_id=str(payload.get("criterion_id", criterion.id)),
                 criterion_description=str(payload.get("criterion_description", criterion.description)),
                 score=safe_int(payload.get("score", 0), 0),
-                verdict=str(payload.get("verdict", "")) or "Не указан вердикт",
                 answer=str(payload.get("answer", "")) or "Нет текстового ответа.",
                 evidence=list(payload.get("evidence", [])) if isinstance(payload.get("evidence", []), list) else [],
                 confidence=safe_float(payload.get("confidence", 0.0), 0.0),
@@ -1177,7 +1164,6 @@ def build_markdown_report(results: list[dict[str, Any]]) -> str:
     for item in results:
         lines.append(f"## {item.get('criterion_id', '')}: {item.get('criterion_description', '')}")
         lines.append(f"**Score:** {item.get('score', 0)}/10")
-        lines.append(f"**Verdict:** {item.get('verdict', '')}")
         lines.append(f"**Confidence:** {item.get('confidence', 0.0):.2f}")
         lines.append("")
         lines.append(item.get("answer", ""))

@@ -1,0 +1,15 @@
+torch>=2.2
+transformers>=4.45
+accelerate>=0.34
+bitsandbytes>=0.43
+sentence-transformers>=3.0
+chromadb>=0.5
+rank-bm25>=0.2.2
+langgraph>=0.2
+langchain-core>=0.3
+langchain-community>=0.3
+langchain-chroma>=0.1
+langchain-text-splitters>=0.3
+langchain-classic>=0.3
+numpy>=1.26
+tqdm>=4.66

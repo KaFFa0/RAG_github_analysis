@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from collections import Counter
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
@@ -39,7 +40,7 @@ DEFAULT_IGNORED_DIRS = {
 
 @dataclass(frozen=True)
 class RepoAnalysisConfig:
-    repo_path: str
+    repo_path: str = "."
     model_name: str = "Qwen/Qwen2.5-3B-Instruct"
     embedding_model_name: str = "sentence-transformers/all-MiniLM-L6-v2"
     chunk_size: int = 1200
@@ -498,8 +499,7 @@ def load_repository_corpus(repo_path: str, config: RepoAnalysisConfig) -> RepoCo
 
 def make_collection_name(prefix: str, repo_path: Path, suffix: str) -> str:
     repo_key = re.sub(r"[^a-zA-Z0-9_-]+", "_", repo_path.as_posix())[-60:]
-    return f"{prefix}_{suffix}_{repo_key}"[:63]
-
+    return f"{prefix}_{suffix}_{repo_key}"[:63].rstrip("._-")
 
 def build_ensemble_retriever(
     docs: list[Document],
@@ -1142,27 +1142,6 @@ def build_markdown_report(results: list[dict[str, Any]]) -> str:
     return "\n".join(lines).strip()
 
 
-def extract_text_from_file(file_path: str) -> str:
-    """Extract text from .txt, .pdf, or .docx files."""
-    path = Path(file_path)
-    if not path.exists():
-        raise FileNotFoundError(f"File not found: {file_path}")
-    suffix = path.suffix.lower()
-    if suffix == ".txt":
-        return path.read_text(encoding="utf-8")
-    elif suffix == ".pdf":
-        import pypdf
-        reader = pypdf.PdfReader(path)
-        text = "\n".join(page.extract_text() or "" for page in reader.pages)
-        return text.strip() or ""
-    elif suffix == ".docx":
-        from docx import Document as DocxDocument
-        doc = DocxDocument(path)
-        paragraphs = [para.text for para in doc.paragraphs if para.text.strip()]
-        return "\n\n".join(paragraphs)
-    else:
-        raise ValueError(f"Unsupported file format: {suffix}")
-
 def _text_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
@@ -1223,14 +1202,16 @@ def load_submission_corpus(text: str, config: RepoAnalysisConfig, title: str = "
 
 class SubmissionAnalyzer:
     """
-    Analyzer for a single text submission (docx, pdf, txt).
+    Analyzer for a single text submission.
     Uses the same retrieval and LLM logic as RepoAnalyzer.
     """
-    def __init__(self, config: RepoAnalysisConfig, file_path: str, title: str = "Submission") -> None:
+    def __init__(self, config: RepoAnalysisConfig, text_content: str, title: str = "Submission") -> None:
         self.config = config
         self.local_llm = LocalQwenChat(config.model_name, load_in_4bit=config.load_in_4bit)
 
-        text = extract_text_from_file(file_path)
+        text = text_content.strip()
+        if not text:
+            raise ValueError("text_content must not be empty")
 
         corpus = load_submission_corpus(text, config, title=title)
         self.index = build_repository_index(corpus, config)
@@ -1346,40 +1327,42 @@ ID: {criterion.id}
         result_state = self.graph.invoke(state)
         return result_state.get("results", [])
 
+def analyze_submission_text(
+    title: str,
+    text_content: str,
+    criteria: list[dict[str, str]],
+    config: RepoAnalysisConfig | None = None,
+) -> list[dict[str, Any]]:
+    analysis_config = config or RepoAnalysisConfig()
+    analyzer = SubmissionAnalyzer(
+        config=analysis_config,
+        text_content=text_content,
+        title=title,
+    )
+    return analyzer.run(criteria)
 
-input_data = {
-    "title": "Технические аспекты",
-    "textContent": "./Technical_Report.docx",
-    # "repo_url": "..."
-    "criteria": [
-        {"id": "101", "description": "Какая модель и подход был использован"},
-        {"id": "102", "description": "Оцените обоснованность решения"},
-        {"id": "103", "description": "Есть ли метрики эффективности"},
-        {"id": "104", "description": "Насколько подробно описан технический стек"},
-    ]
-}
 
-repo_url = "https://github.com/KaFFa0/Multimodal-Reasoning-for-STEM"
-repo_path = clone_repo(repo_url, "./target")
+def analyze_repository_path(
+    repo_path: str,
+    criteria: list[dict[str, str]],
+    config: RepoAnalysisConfig | None = None,
+) -> list[dict[str, Any]]:
+    if config is None:
+        analysis_config = RepoAnalysisConfig(repo_path=repo_path)
+    else:
+        analysis_config = RepoAnalysisConfig(
+            **{**asdict(config), "repo_path": repo_path},
+        )
 
-config = RepoAnalysisConfig(
-    repo_path=repo_path, #clone_repo(input_data["repo_url"], "./target")
-    model_name="Qwen/Qwen2.5-3B-Instruct",
-    load_in_4bit=True,
-    max_new_tokens=512,
-)
+    analyzer = RepoAnalyzer(analysis_config)
+    return analyzer.run(criteria)
 
-sub_analyzer = SubmissionAnalyzer(
-    config=config,
-    file_path=input_data["textContent"],
-    title=input_data["title"],
-)
 
-results = sub_analyzer.run(input_data["criteria"])
-print(json.dumps(results, ensure_ascii=False, indent=2))
-print(build_markdown_report(results))
-
-repo_analyzer = RepoAnalyzer(config)
-results = repo_analyzer.run(input_data["criteria"])
-print(json.dumps(results, ensure_ascii=False, indent=2))
-print(build_markdown_report(results))
+def analyze_repository_url(
+    repo_url: str,
+    criteria: list[dict[str, str]],
+    config: RepoAnalysisConfig | None = None,
+) -> list[dict[str, Any]]:
+    with tempfile.TemporaryDirectory(prefix="repo-analysis-") as temp_dir:
+        repo_path = clone_repo(repo_url, temp_dir)
+        return analyze_repository_path(repo_path=repo_path, criteria=criteria, config=config)

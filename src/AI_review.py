@@ -9,8 +9,9 @@ import tempfile
 from collections import Counter
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Any, Annotated, TypedDict
+from typing import Any, Annotated, TypedDict, Optional
 import hashlib
+import requests
 
 import torch
 from langchain_community.retrievers import BM25Retriever
@@ -41,10 +42,12 @@ DEFAULT_IGNORED_DIRS = {
 @dataclass(frozen=True)
 class RepoAnalysisConfig:
     repo_path: str = "."
-    model_name: str = "Qwen/Qwen2.5-3B-Instruct"
+    api_base_url: str = ""
+    api_key: str = ""                                
+    api_model_name: str = ""               
     embedding_model_name: str = "sentence-transformers/all-MiniLM-L6-v2"
     chunk_size: int = 1200
-    chunk_overlap: int = 180
+    chunk_overlap: int = 360
     top_k_file_vector: int = 8
     top_k_file_bm25: int = 8
     top_k_chunk_vector: int = 18
@@ -55,7 +58,6 @@ class RepoAnalysisConfig:
     temperature: float = 0.1
     persist_directory: str | None = None
     chroma_collection_prefix: str = "repo_analysis"
-    load_in_4bit: bool = True
     ignored_dirs: set[str] | None = None
     max_file_doc_chars: int = 10_000
     max_notebook_cell_chars: int = 4_000
@@ -97,50 +99,38 @@ class RepositoryIndex:
     chunk_vectorstore: Any
     chunk_retriever: BaseRetriever
 
-
-class LocalQwenChat:
-    def __init__(self, model_name: str, load_in_4bit: bool = True) -> None:
+class APIChat:
+    def __init__(self, api_base_url: str, api_key: str, model_name: str) -> None:
+        self.api_base_url = api_base_url.rstrip('/')
+        self.api_key = api_key
         self.model_name = model_name
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-
-        quant_config = None
-        if load_in_4bit:
-            quant_config = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_compute_dtype=torch.float16,
-                bnb_4bit_use_double_quant=True,
-                bnb_4bit_quant_type="nf4",
-            )
-
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            trust_remote_code=True,
-            quantization_config=quant_config,
-            device_map="auto",
-        )
-        self.model.eval()
 
     def generate(self, system: str, user: str, max_new_tokens: int = 384, temperature: float = 0.1) -> str:
-        messages = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ]
-        prompt = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
-        input_len = inputs["input_ids"].shape[-1]
+        headers = {
+            "Content-Type": "application/json",
+        }
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
 
-        with torch.inference_mode():
-            output = self.model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                do_sample=temperature > 0,
-                temperature=temperature,
-                top_p=0.95,
-                eos_token_id=self.tokenizer.eos_token_id,
-            )
+        payload = {
+            "model": self.model_name,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user}
+            ],
+            "max_tokens": max_new_tokens,
+            "temperature": temperature,
+            "stream": False,
+        }
 
-        generated_ids = output[0][input_len:]
-        return self.tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
+        url = f"{self.api_base_url}/chat/completions"
+        try:
+            resp = requests.post(url, headers=headers, json=payload, timeout=120)
+            resp.raise_for_status()
+            data = resp.json()
+            return data["choices"][0]["message"]["content"].strip()
+        except Exception as e:
+            raise RuntimeError(f"API call failed: {e}") from e
 
 
 class SentenceTransformerEmbeddings:
@@ -597,6 +587,7 @@ SYSTEM_PROMPT = """Ты аналитик GitHub-репозиториев
 - Не выдумывай факты, которых нет в контексте
 - Если данных недостаточно, явно скажи, чего не хватает
 - В evidence добавляй только то, что реально видно в контексте
+- В criterion_description просто перепиши изначальный критерий
 - score: целое число от 0 до 10
 - confidence: число от 0 до 1
 
@@ -1005,7 +996,11 @@ class RepoAnalyzer:
     def __init__(self, config: RepoAnalysisConfig) -> None:
         self.config = config
         self.repo_path = Path(config.repo_path).resolve()
-        self.local_llm = LocalQwenChat(config.model_name, load_in_4bit=config.load_in_4bit)
+        self.llm = APIChat(
+            api_base_url=config.api_base_url,
+            api_key=config.api_key,
+            model_name=config.api_model_name
+        )
 
         corpus = load_repository_corpus(str(self.repo_path), config)
         self.index = build_repository_index(corpus, config)
@@ -1070,7 +1065,7 @@ ID: {criterion.id}
 Сделай оценку по этому критерию. Верни только JSON по заданной схеме
 """
 
-            raw = self.local_llm.generate(
+            raw = self.llm.generate(
                 system=SYSTEM_PROMPT,
                 user=user_prompt,
                 max_new_tokens=self.config.max_new_tokens,
@@ -1082,7 +1077,7 @@ ID: {criterion.id}
                 payload = self._parse_or_recover(raw, criterion)
             except Exception:
                 retry_prompt = user_prompt + "\n\nВажно: верни только один JSON-объект без markdown fences, без пояснений и без обертки по ключу критерия"
-                raw_retry = self.local_llm.generate(
+                raw_retry = self.llm.generate(
                     system=SYSTEM_PROMPT,
                     user=retry_prompt,
                     max_new_tokens=self.config.max_new_tokens,
@@ -1207,7 +1202,11 @@ class SubmissionAnalyzer:
     """
     def __init__(self, config: RepoAnalysisConfig, text_content: str, title: str = "Submission") -> None:
         self.config = config
-        self.local_llm = LocalQwenChat(config.model_name, load_in_4bit=config.load_in_4bit)
+        self.llm = APIChat(
+            api_base_url=config.api_base_url,
+            api_key=config.api_key,
+            model_name=config.api_model_name
+        )
 
         text = text_content.strip()
         if not text:
@@ -1243,7 +1242,7 @@ ID: {criterion.id}
 
 Сделай оценку по этому критерию. Верни только JSON по заданной схеме
 """
-            raw = self.local_llm.generate(
+            raw = self.llm.generate(
                 system=SYSTEM_PROMPT,
                 user=user_prompt,
                 max_new_tokens=self.config.max_new_tokens,
@@ -1255,7 +1254,7 @@ ID: {criterion.id}
                 payload = self._parse_or_recover(raw, criterion)
             except Exception:
                 retry_prompt = user_prompt + "\n\nВажно: верни только один JSON-объект без markdown fences, без пояснений и без обертки по ключу критерия"
-                raw_retry = self.local_llm.generate(
+                raw_retry = self.llm.generate(
                     system=SYSTEM_PROMPT,
                     user=retry_prompt,
                     max_new_tokens=self.config.max_new_tokens,
@@ -1366,3 +1365,10 @@ def analyze_repository_url(
     with tempfile.TemporaryDirectory(prefix="repo-analysis-") as temp_dir:
         repo_path = clone_repo(repo_url, temp_dir)
         return analyze_repository_path(repo_path=repo_path, criteria=criteria, config=config)
+
+config = RepoAnalysisConfig(
+    api_base_url="https://api.mistral.ai/v1",
+    api_key="rTugQsiCeCnx1Tg7a5aoEEiiggZ5mGf7",
+    api_model_name="open-mistral-7b", 
+    max_new_tokens=1024,
+)

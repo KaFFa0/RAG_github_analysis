@@ -1365,10 +1365,3 @@ def analyze_repository_url(
     with tempfile.TemporaryDirectory(prefix="repo-analysis-") as temp_dir:
         repo_path = clone_repo(repo_url, temp_dir)
         return analyze_repository_path(repo_path=repo_path, criteria=criteria, config=config)
-
-config = RepoAnalysisConfig(
-    api_base_url="https://api.mistral.ai/v1",
-    api_key="rTugQsiCeCnx1Tg7a5aoEEiiggZ5mGf7",
-    api_model_name="open-mistral-7b", 
-    max_new_tokens=1024,
-)

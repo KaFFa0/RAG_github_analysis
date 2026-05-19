@@ -59,6 +59,12 @@ DEFAULT_IGNORED_DIRS = {
     ".pytest_cache",".ruff_cache",".venv","venv",
 }
 
+SPECIAL_FILENAMES = {
+    "dockerfile", "makefile", "license",
+    "readme", "readme.md","readme.rst",
+    "readme.txt",
+}
+
 @dataclass(frozen=True)
 class Criterion:
     id: str
@@ -181,15 +187,29 @@ def load_repository_corpus(repo_path: str, config: RepoAnalysisConfig) -> RepoCo
     chunk_docs: list[Document] = []
     pinned_docs: list[Document] = []
     manifest_kinds: Counter[str] = Counter()
+
+    all_paths: list[str] = []
     manifest_paths: list[str] = []
 
     for path in root.rglob("*"):
         if not path.is_file():
             continue
+
         rel = path.relative_to(root)
         if is_ignored_path(rel, ignored):
             continue
-        if path.suffix.lower() not in TEXT_EXTENSIONS and path.name not in {"Dockerfile", "Makefile", "LICENSE", "README", "README.md"}:
+        all_paths.append(str(rel))
+        filename = path.name.lower()
+
+        if filename.startswith("license"):
+            continue
+        
+        # сюда попадают только те файлы, которые реально будем читать как текст
+        if (
+            path.suffix.lower() not in TEXT_EXTENSIONS
+            and not filename.startswith("readme")
+            and filename not in SPECIAL_FILENAMES
+        ):
             continue
 
         try:
@@ -206,26 +226,86 @@ def load_repository_corpus(repo_path: str, config: RepoAnalysisConfig) -> RepoCo
         manifest_kinds[file_doc.metadata.get("kind", "unknown")] += 1
 
         p = str(rel).lower()
-        if "readme" in p:
+        if filename.startswith("readme"):
             pinned_docs.append(file_doc)
         elif "/docs/" in p or p.startswith("docs/") or p.endswith(".md"):
             pinned_docs.append(file_doc)
 
     if not file_docs:
         raise ValueError(
-            f"No readable text files found under {root}. "
-            f"Check whether the repo is empty, fully binary, or filtered by ignored_dirs."
+            f"No readable text files found under {root}"
+            f"Check whether the repo is empty, fully binary, or filtered by ignored_dirs"
         )
 
     pinned_docs = dedupe_docs(pinned_docs)[: max(1, config.top_k_pinned)]
+
+    repo_tree = build_repo_tree(all_paths)
+
+    structure_text = f"""
+Repository structure overview
+
+Root: {root.name}
+
+All files: {len(all_paths)}
+Readable files: {len(manifest_paths)}
+
+Repository tree:
+{repo_tree}
+
+Important readable files:
+{chr(10).join(sorted(manifest_paths)[:200])}
+""".strip()
+
+    structure_doc = make_doc(
+        structure_text,
+        {
+            "path": "__REPO_STRUCTURE__",
+            "name": "__REPO_STRUCTURE__",
+            "kind": "structure",
+            "part": "repo_tree",
+        },
+    )
 
     manifest = {
         "num_files": len(file_docs),
         "num_chunks": len(chunk_docs),
         "kinds": dict(manifest_kinds),
         "paths": manifest_paths,
+        "all_paths": all_paths,
     }
-    return RepoCorpus(root=root, file_docs=file_docs, chunk_docs=chunk_docs, manifest=manifest, pinned_docs=pinned_docs)
+
+    file_docs.append(structure_doc)
+    pinned_docs.insert(0, structure_doc)
+
+    return RepoCorpus(
+        root=root,
+        file_docs=file_docs,
+        chunk_docs=chunk_docs,
+        manifest=manifest,
+        pinned_docs=pinned_docs,
+    )
+
+def build_repo_tree(paths: list[str]) -> str:
+    tree = {}
+
+    for path in sorted(paths):
+        parts = path.split("/")
+        node = tree
+        for part in parts:
+            node = node.setdefault(part, {})
+
+    lines = []
+    def walk(node, prefix=""):
+        items = sorted(node.items())
+
+        for idx, (name, child) in enumerate(items):
+            connector = "└── " if idx == len(items) - 1 else "├── "
+            lines.append(prefix + connector + name)
+            extension = "    " if idx == len(items) - 1 else "│   "
+            walk(child, prefix + extension)
+    walk(tree)
+
+    return "\n".join(lines)
 
 
 # Retrieval setup
@@ -385,7 +465,7 @@ def doc_kind_weight(doc: Document) -> float:
     elif kind == "config":
         score += 1.0
     elif kind == "license":
-        score -= 3.0
+        score -= 100.0
     elif kind == "ops":
         score += 0.5
     return score

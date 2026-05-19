@@ -83,7 +83,7 @@ class RepoAnalysisConfig:
     top_k_file_bm25: int = 8
     top_k_chunk_vector: int = 18
     top_k_chunk_bm25: int = 18
-    top_k_final_context: int = 8
+    top_k_final_context: int = 12
     top_k_pinned: int = 2
     max_new_tokens: int = 512
     temperature: float = 0.1

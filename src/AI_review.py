@@ -21,8 +21,6 @@ from langgraph.types import Send
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 from utils import (
-    Criterion,
-    RepoAnalysisConfig,
     infer_kind,
     is_ignored_path,
     _read_binary_safe_text,
@@ -60,6 +58,37 @@ DEFAULT_IGNORED_DIRS = {
     "target","__pycache__",".mypy_cache",
     ".pytest_cache",".ruff_cache",".venv","venv",
 }
+
+@dataclass(frozen=True)
+class Criterion:
+    id: str
+    description: str
+
+@dataclass(frozen=True)
+class RepoAnalysisConfig:
+    repo_path: str = "."
+    api_base_url: str = ""
+    api_key: str = ""
+    api_model_name: str = ""
+    embedding_model_name: str = "sentence-transformers/all-MiniLM-L6-v2"
+    chunk_size: int = 1200
+    chunk_overlap: int = 360
+    top_k_file_vector: int = 8
+    top_k_file_bm25: int = 8
+    top_k_chunk_vector: int = 18
+    top_k_chunk_bm25: int = 18
+    top_k_final_context: int = 8
+    top_k_pinned: int = 2
+    max_new_tokens: int = 512
+    temperature: float = 0.1
+    persist_directory: str | None = None
+    chroma_collection_prefix: str = "repo_analysis"
+    ignored_dirs: set[str] | None = None
+    max_file_doc_chars: int = 10_000
+    max_notebook_cell_chars: int = 4_000
+    max_notebook_output_chars: int = 2_000
+    max_docs_per_path: int = 2
+
 
 @dataclass
 class CriterionResult:
@@ -654,8 +683,8 @@ def load_submission_corpus(text: str, config: RepoAnalysisConfig, title: str = "
 
 class SubmissionAnalyzer:
     """
-    Analyzer for a single text submission.
-    Uses the same retrieval and LLM logic as RepoAnalyzer.
+    Analyzer for a single text submission
+    Uses the same retrieval and LLM logic as RepoAnalyzer
     """
     def __init__(self, config: RepoAnalysisConfig, text_content: str, title: str = "Submission") -> None:
         self.config = config

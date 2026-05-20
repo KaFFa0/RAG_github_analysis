@@ -250,6 +250,9 @@ def parse_text_file(path: Path, rel_path: str, config: RepoAnalysisConfig) -> tu
     if not text:
         raise ValueError(f"Unreadable text file: {path}")
 
+    if path.suffix.lower() == '.md':
+        text = merge_markdown_tables(text)
+
     kind = infer_kind(path)
     file_doc = make_doc(
         compact_doc_for_file(text, config.max_file_doc_chars),
@@ -542,3 +545,43 @@ def normalize_payload(payload: dict[str, Any], criterion: Criterion, raw: str) -
     }
 
     return normalized
+
+def merge_markdown_tables(text: str) -> str:
+    """
+    Находит markdown-таблицы и заменяет внутренние переводы строк на ' ; ',
+    чтобы RecursiveCharacterTextSplitter не разбил их на отдельные чанки
+    Сохраняет одну пустую строку перед таблицей и одну после
+    """
+    lines = text.split('\n')
+    out = []
+    in_table = False
+    table_buffer = []
+    
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        is_table_line = bool(re.match(r'^\|.*\|$', stripped))
+        is_separator = bool(re.match(r'^\|[\s\-:]+\|$', stripped))  
+        
+        if is_table_line and not is_separator:
+            if not in_table:
+                in_table = True
+                table_buffer = [stripped]
+            else:
+                table_buffer.append(stripped)
+        else:
+            if in_table:
+                merged = ' ; '.join(table_buffer)
+                out.append('')          
+                out.append(merged)
+                out.append('')          
+                in_table = False
+                table_buffer = []
+            out.append(line)
+    
+    if in_table:
+        merged = ' ; '.join(table_buffer)
+        out.append('')
+        out.append(merged)
+        out.append('')
+    
+    return '\n'.join(out)
